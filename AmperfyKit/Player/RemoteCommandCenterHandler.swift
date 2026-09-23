@@ -31,6 +31,8 @@ public class RemoteCommandCenterHandler {
   private let getLibrarySyncerCB: GetLibrarySyncerCallback
   private let eventLogger: EventLogger
   private let remoteCommandCenter: MPRemoteCommandCenter
+  private var seekTimer: Timer?
+  private var seekStartDate = Date()
 
   init(
     musicPlayer: PlayerFacade,
@@ -125,6 +127,21 @@ public class RemoteCommandCenterHandler {
       return .success
     })
 
+    // Pressing and holding next/previous (e.g. CarPlay, steering wheel, headphones) fast-forwards/rewinds
+    remoteCommandCenter.seekForwardCommand.isEnabled = true
+    remoteCommandCenter.seekForwardCommand.addTarget(handler: { event in
+      guard let command = event as? MPSeekCommandEvent else { return .noSuchContent }
+      self.handleSeek(command, isForward: true)
+      return .success
+    })
+
+    remoteCommandCenter.seekBackwardCommand.isEnabled = true
+    remoteCommandCenter.seekBackwardCommand.addTarget(handler: { event in
+      guard let command = event as? MPSeekCommandEvent else { return .noSuchContent }
+      self.handleSeek(command, isForward: false)
+      return .success
+    })
+
     remoteCommandCenter.changePlaybackRateCommand.isEnabled = true
     remoteCommandCenter.changePlaybackRateCommand.supportedPlaybackRates = PlaybackRate.allCases
       .map { NSNumber(value: $0.asDouble) }
@@ -214,6 +231,8 @@ public class RemoteCommandCenterHandler {
       remoteCommandCenter.likeCommand.isEnabled = true
       remoteCommandCenter.likeCommand.isActive = currentItem.isFavorite
       remoteCommandCenter.changePlaybackPositionCommand.isEnabled = true
+      remoteCommandCenter.seekForwardCommand.isEnabled = true
+      remoteCommandCenter.seekBackwardCommand.isEnabled = true
       remoteCommandCenter.changePlaybackRateCommand.isEnabled = true
     case .podcastEpisode:
       remoteCommandCenter.playCommand.isEnabled = true
@@ -229,6 +248,8 @@ public class RemoteCommandCenterHandler {
       remoteCommandCenter.likeCommand.isEnabled = false
       remoteCommandCenter.likeCommand.isActive = false
       remoteCommandCenter.changePlaybackPositionCommand.isEnabled = true
+      remoteCommandCenter.seekForwardCommand.isEnabled = true
+      remoteCommandCenter.seekBackwardCommand.isEnabled = true
       remoteCommandCenter.changePlaybackRateCommand.isEnabled = true
     case .radio:
       remoteCommandCenter.playCommand.isEnabled = true
@@ -244,10 +265,50 @@ public class RemoteCommandCenterHandler {
       remoteCommandCenter.likeCommand.isEnabled = false
       remoteCommandCenter.likeCommand.isActive = false
       remoteCommandCenter.changePlaybackPositionCommand.isEnabled = false
+      remoteCommandCenter.seekForwardCommand.isEnabled = false
+      remoteCommandCenter.seekBackwardCommand.isEnabled = false
       remoteCommandCenter.changePlaybackRateCommand.isEnabled = false
     }
     updateShuffle()
     updateRepeat()
+  }
+
+  private static let seekTickInterval: TimeInterval = 0.25
+
+  private func handleSeek(_ command: MPSeekCommandEvent, isForward: Bool) {
+    stopSeeking()
+    guard command.type == .beginSeeking else { return }
+    seekStartDate = Date()
+    seekTimer = Timer.scheduledTimer(
+      withTimeInterval: Self.seekTickInterval,
+      repeats: true
+    ) { [weak self] _ in
+      Task { @MainActor in
+        self?.seekTick(isForward: isForward)
+      }
+    }
+  }
+
+  private func seekTick(isForward: Bool) {
+    // Speed up the longer the button is held: 8x, then 16x, then 32x
+    let heldSeconds = Date().timeIntervalSince(seekStartDate)
+    let speed: Double = heldSeconds < 3 ? 8 : (heldSeconds < 6 ? 16 : 32)
+    let step = speed * Self.seekTickInterval
+    let duration = musicPlayer.duration
+    var target = musicPlayer.elapsedTime + (isForward ? step : -step)
+    if duration > 0 {
+      target = min(target, duration - 1)
+    }
+    target = max(target, 0)
+    musicPlayer.seek(toSecond: target)
+    if target <= 0 || (duration > 0 && target >= duration - 1) {
+      stopSeeking()
+    }
+  }
+
+  private func stopSeeking() {
+    seekTimer?.invalidate()
+    seekTimer = nil
   }
 
   private func updateShuffle() {
