@@ -275,25 +275,36 @@ public class RemoteCommandCenterHandler {
 
   private static let seekTickInterval: TimeInterval = 0.25
 
+  /// Behaves like Apple Music: fast-forward plays the audio faster (2x, 4x, 8x the longer the button is held),
+  /// rewind jumps backwards in steps that grow the longer the button is held.
+  /// Streamed (not cached) items can't be buffered fast enough for the higher speeds,
+  /// so they fast-forward by jumping as well.
   private func handleSeek(_ command: MPSeekCommandEvent, isForward: Bool) {
     stopSeeking()
     guard command.type == .beginSeeking else { return }
     seekStartDate = Date()
+    let isCached = musicPlayer.currentlyPlaying?.isCached ?? false
+    let isSpeedingUp = isForward && isCached
     seekTimer = Timer.scheduledTimer(
       withTimeInterval: Self.seekTickInterval,
       repeats: true
     ) { [weak self] _ in
       Task { @MainActor in
-        self?.seekTick(isForward: isForward)
+        self?.seekTick(isForward: isForward, isSpeedingUp: isSpeedingUp)
       }
     }
+    seekTick(isForward: isForward, isSpeedingUp: isSpeedingUp)
   }
 
-  private func seekTick(isForward: Bool) {
-    // Speed up the longer the button is held: 8x, then 16x, then 32x
+  private func seekTick(isForward: Bool, isSpeedingUp: Bool) {
     let heldSeconds = Date().timeIntervalSince(seekStartDate)
-    let speed: Double = heldSeconds < 3 ? 8 : (heldSeconds < 6 ? 16 : 32)
-    let step = speed * Self.seekTickInterval
+    let stage = heldSeconds < 2 ? 0 : (heldSeconds < 5 ? 1 : 2)
+    if isSpeedingUp {
+      backendAudioPlayer.setTemporaryPlaybackSpeed([2.0, 4.0, 8.0][stage])
+      return
+    }
+    // Jumps have to outpace the audio that keeps playing at normal speed
+    let step = [8.0, 16.0, 32.0][stage] * Self.seekTickInterval
     let duration = musicPlayer.duration
     var target = musicPlayer.elapsedTime + (isForward ? step : -step)
     if duration > 0 {
@@ -307,8 +318,10 @@ public class RemoteCommandCenterHandler {
   }
 
   private func stopSeeking() {
-    seekTimer?.invalidate()
-    seekTimer = nil
+    guard let seekTimer else { return }
+    seekTimer.invalidate()
+    self.seekTimer = nil
+    backendAudioPlayer.setTemporaryPlaybackSpeed(nil)
   }
 
   private func updateShuffle() {
